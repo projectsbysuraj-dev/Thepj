@@ -10,6 +10,7 @@ import {
   getStoredTheme,
   subscribeRealtime,
   processReferralJoin,
+  syncUserWithRemote,
 } from './services/store';
 import { initTelegramApp, getTelegramReferralParam } from './services/telegram';
 import { Header } from './components/Header';
@@ -85,7 +86,23 @@ export default function App() {
       const freshUser = getCurrentUser();
       setUser(freshUser);
       checkAndProcessReferral(freshUser);
+      syncUserWithRemote(freshUser.id).then((fresh) => {
+        if (fresh) setUser(fresh);
+      });
     }, 250);
+
+    // Initial remote profile sync
+    syncUserWithRemote(initialUser.id).then((fresh) => {
+      if (fresh) setUser(fresh);
+    });
+
+    // Auto-sync user balance & spins every 3.5 seconds
+    const userSyncInterval = setInterval(() => {
+      const current = getCurrentUser();
+      syncUserWithRemote(current.id).then((fresh) => {
+        if (fresh) setUser(fresh);
+      });
+    }, 3500);
 
     // 2. Listen to route / URL changes (popstate & hashchange)
     const handleUrlChange = () => {
@@ -103,6 +120,7 @@ export default function App() {
 
     return () => {
       clearTimeout(tgTimer);
+      clearInterval(userSyncInterval);
       window.removeEventListener('popstate', handleUrlChange);
       window.removeEventListener('hashchange', handleUrlChange);
       unsubscribe();

@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { X, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { AppSettings, UserProfile, WithdrawalMethod } from '../types';
-import { requestWithdrawal } from '../services/store';
+import { requestWithdrawal, syncUserWithRemote } from '../services/store';
 import { triggerHaptic } from '../services/telegram';
 
 interface WithdrawModalProps {
@@ -26,8 +26,18 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
   const [ifsc, setIfsc] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [liveBalance, setLiveBalance] = useState<number>(user.balance);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Sync latest user balance from database on modal open
+  useEffect(() => {
+    syncUserWithRemote(user.id).then((fresh) => {
+      if (fresh && typeof fresh.balance === 'number') {
+        setLiveBalance(fresh.balance);
+      }
+    });
+  }, [user.id]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -38,8 +48,20 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
       return;
     }
 
-    if (numAmount > user.balance) {
-      setError(`Insufficient balance! Your available balance is ₹${user.balance.toFixed(2)}`);
+    // Refresh balance once more before submission
+    let currentBal = liveBalance;
+    try {
+      const fresh = await syncUserWithRemote(user.id);
+      if (fresh && typeof fresh.balance === 'number') {
+        currentBal = fresh.balance;
+        setLiveBalance(currentBal);
+      }
+    } catch {
+      // Use current liveBalance
+    }
+
+    if (numAmount > currentBal) {
+      setError(`Insufficient balance! Your available balance is ₹${currentBal.toFixed(2)}`);
       triggerHaptic('error');
       return;
     }
@@ -117,7 +139,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
               AVAILABLE BALANCE
             </span>
             <span className="font-['Outfit'] font-black text-xl text-[#38bdf8]">
-              ₹ {user.balance.toFixed(2)}
+              ₹ {liveBalance.toFixed(2)}
             </span>
           </div>
           <div className="text-right">

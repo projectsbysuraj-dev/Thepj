@@ -474,6 +474,66 @@ export function saveUsers(users: UserProfile[]): void {
   }
 }
 
+export function saveSingleUser(u: UserProfile): void {
+  const users = getAllUsers();
+  const cleanId = String(u.id).trim();
+  const idx = users.findIndex(x => String(x.id).trim() === cleanId || String(x.telegramId).trim() === cleanId);
+  if (idx >= 0) {
+    users[idx] = u;
+  } else {
+    users.push(u);
+  }
+  localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+  notifySubscribers('users_updated');
+
+  if (rtdb) {
+    set(ref(rtdb, `users/${u.id}`), u).catch(() => {});
+  }
+  try {
+    fetch(`https://telebot-26c11-default-rtdb.firebaseio.com/users/${u.id}.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(u),
+    }).catch(() => {});
+  } catch {
+    // Ignore
+  }
+}
+
+/**
+ * Live single user sync directly from Firebase RTDB REST API
+ */
+export async function syncUserWithRemote(userId: string): Promise<UserProfile | null> {
+  try {
+    const cleanId = String(userId).trim();
+    if (!cleanId) return null;
+    const resp = await fetch(`https://telebot-26c11-default-rtdb.firebaseio.com/users/${cleanId}.json`, {
+      cache: 'no-store',
+    });
+    if (resp.ok) {
+      const remoteUser = await resp.json();
+      if (remoteUser && typeof remoteUser === 'object' && remoteUser.id) {
+        const users = getAllUsers();
+        const idx = users.findIndex(x => String(x.id).trim() === cleanId || String(x.telegramId).trim() === cleanId);
+        let updated: UserProfile;
+        if (idx >= 0) {
+          updated = { ...users[idx], ...remoteUser };
+          users[idx] = updated;
+        } else {
+          updated = remoteUser as UserProfile;
+          users.push(updated);
+        }
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+        notifySubscribers('user_synced_from_remote');
+        return updated;
+      }
+    }
+  } catch (err) {
+    console.warn('syncUserWithRemote notice:', err);
+  }
+  return null;
+}
+
 export function getCurrentUser(): UserProfile {
   const users = getAllUsers();
   const tgUser = getTelegramUser();
@@ -611,27 +671,29 @@ export function createOrUpdateUser(profile: Partial<UserProfile> & { id: string 
 
 export function addSpinsToUser(userId: string, spinsToAdd: number): UserProfile | null {
   const users = getAllUsers();
-  const user = users.find(u => u.id === userId);
+  const cleanId = String(userId).trim();
+  const user = users.find(u => String(u.id).trim() === cleanId || String(u.telegramId).trim() === cleanId);
   if (!user) return null;
 
   user.spins = Math.max(0, (user.spins || 0) + spinsToAdd);
   if (spinsToAdd > 0) {
     user.spinsEarned = (user.spinsEarned || 0) + spinsToAdd;
   }
-  saveUsers(users);
+  saveSingleUser(user);
   return user;
 }
 
 export function addBalanceToUser(userId: string, amount: number, description = 'Admin Adjustment'): UserProfile | null {
   const users = getAllUsers();
-  const user = users.find(u => u.id === userId);
+  const cleanId = String(userId).trim();
+  const user = users.find(u => String(u.id).trim() === cleanId || String(u.telegramId).trim() === cleanId);
   if (!user) return null;
 
   user.balance = Math.max(0, Number((user.balance + amount).toFixed(2)));
-  saveUsers(users);
+  saveSingleUser(user);
 
   addTransaction({
-    userId,
+    userId: user.id,
     type: 'admin_adjustment',
     amount,
     description,
@@ -643,11 +705,12 @@ export function addBalanceToUser(userId: string, amount: number, description = '
 
 export function decrementUserSpin(userId: string): boolean {
   const users = getAllUsers();
-  const user = users.find(u => u.id === userId);
+  const cleanId = String(userId).trim();
+  const user = users.find(u => String(u.id).trim() === cleanId || String(u.telegramId).trim() === cleanId);
   if (!user || user.spins <= 0) return false;
 
   user.spins -= 1;
-  saveUsers(users);
+  saveSingleUser(user);
   return true;
 }
 
@@ -786,7 +849,7 @@ export function requestWithdrawal(req: Omit<WithdrawalRequest, 'id' | 'status' |
 
   // Deduct balance immediately
   u.balance = Number((u.balance - req.amount).toFixed(2));
-  saveUsers(users);
+  saveSingleUser(u);
 
   const withdrawalId = `w_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const withdrawal: WithdrawalRequest = {
