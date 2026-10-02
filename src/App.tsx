@@ -19,6 +19,7 @@ import { InviteScreen } from './components/InviteScreen';
 import { WalletScreen } from './components/WalletScreen';
 import { ProfileScreen } from './components/ProfileScreen';
 import { AdminPortal } from './components/AdminPortal';
+import { DeviceVerificationScreen } from './components/DeviceVerificationScreen';
 
 function checkIsAdminRoute(): boolean {
   if (typeof window === 'undefined') return false;
@@ -39,6 +40,18 @@ export default function App() {
   const [user, setUser] = useState<UserProfile>(getCurrentUser());
   const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
   const [theme, setTheme] = useState<ThemeSettings>(getStoredTheme());
+  const [showVerification, setShowVerification] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const search = new URLSearchParams(window.location.search);
+    const hash = window.location.hash;
+    const isVerifyParam = search.get('verify') === 'true' || hash.includes('verify=true');
+    const boundId = localStorage.getItem('rg_bound_telegram_id_v1');
+    const currentUser = getCurrentUser();
+    // Show if explicit ?verify=true or if multi-account switch detected
+    if (isVerifyParam) return true;
+    if (boundId && boundId !== String(currentUser.id)) return true;
+    return false;
+  });
 
   const handleNavigateToUserApp = useCallback(() => {
     if (typeof window !== 'undefined') {
@@ -95,6 +108,20 @@ export default function App() {
       unsubscribe();
     };
   }, []);
+
+  // -------------------------------------------------------------
+  // Device Verification Screen (Matching Screenshot 3 & Anti-Switch Lock)
+  // -------------------------------------------------------------
+  if (showVerification) {
+    return (
+      <DeviceVerificationScreen
+        user={user}
+        settings={settings}
+        referrerId={getTelegramReferralParam()}
+        onContinue={() => setShowVerification(false)}
+      />
+    );
+  }
 
   // -------------------------------------------------------------
   // Dedicated Admin Portal at /admin

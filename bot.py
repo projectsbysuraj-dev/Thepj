@@ -448,7 +448,7 @@ async def process_and_notify_referral(
 def build_success_keyboard(referrer_id: str | None = None) -> InlineKeyboardMarkup:
     """
     CRITICAL: ONLY called after 100% successful verification across ALL channels!
-    Gives the user the 'Open Giveaway App & Spin' button.
+    Gives the user the 'Open Reward App' button (Matching Screenshot 4).
     """
     app_url = WEB_URL
     if referrer_id:
@@ -456,49 +456,53 @@ def build_success_keyboard(referrer_id: str | None = None) -> InlineKeyboardMark
         sep = "&" if "?" in app_url else "?"
         app_url = f"{app_url}{sep}start=ref_{clean_ref}"
 
-    channels = load_channels_from_db()
     keyboard = [
         [
             InlineKeyboardButton(
-                "🚀 Open Giveaway App & Spin",
+                "🎁 Open Reward App",
                 web_app=WebAppInfo(url=app_url),
             )
         ]
     ]
+    return InlineKeyboardMarkup(keyboard)
 
-    for ch in channels[:2]:
-        name = ch.get("name") or "Official Channel"
+
+def build_channel_join_keyboard(channels: list[dict], referrer_id: str | None = None) -> InlineKeyboardMarkup:
+    """
+    GATEKEEPER KEYBOARD (Matching Screenshot 1):
+    Grid of 2 columns of 'Join ↗' buttons for all channels,
+    with a full-width '🟢 Claim' button at the bottom!
+    """
+    callback_data = f"claim_{referrer_id}" if referrer_id else "claim_none"
+    keyboard = []
+
+    # Format channels in 2 columns
+    row = []
+    for ch in channels:
         url = ch.get("url")
-        if url:
-            keyboard.append([InlineKeyboardButton(f"📢 {name}", url=url)])
+        if not url:
+            cid = str(ch.get("id", ""))
+            url = f"https://t.me/{cid.lstrip('@')}" if cid.startswith("@") else f"https://t.me/c/{cid.replace('-100', '')}/1"
+
+        row.append(InlineKeyboardButton("Join ↗", url=url))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    # Bottom Claim button (Matching Screenshot 1)
+    keyboard.append([
+        InlineKeyboardButton("🟢 Claim", callback_data=callback_data)
+    ])
 
     return InlineKeyboardMarkup(keyboard)
 
 
 def build_join_keyboard(missing_channels: list[dict], referrer_id: str | None = None) -> InlineKeyboardMarkup:
-    """
-    GATEKEEPER KEYBOARD:
-    Shown when user has NOT joined all channels.
-    CONTAINS ZERO GIVEAWAY LINKS. Only Join Channel buttons + Verify button!
-    """
-    callback_data = f"check_{referrer_id}" if referrer_id else "check_none"
-    keyboard = []
-
-    for ch in missing_channels:
-        name = ch.get("name") or ch.get("id") or "Join Channel"
-        url = ch.get("url")
-        if not url:
-            cid = str(ch.get("id", ""))
-            url = f"https://t.me/{cid.lstrip('@')}" if cid.startswith("@") else f"https://t.me/c/{cid.replace('-100', '')}/1"
-        keyboard.append([
-            InlineKeyboardButton(f"📢 Join {name}", url=url)
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton("✅ I Have Joined All (Verify)", callback_data=callback_data)
-    ])
-
-    return InlineKeyboardMarkup(keyboard)
+    """Backward compatibility alias for channel join keyboard."""
+    return build_channel_join_keyboard(missing_channels, referrer_id)
 
 
 def build_invite_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -512,7 +516,7 @@ def build_invite_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📲 Share Link with Friends (1 Click)", url=share_url),
         ],
         [
-            InlineKeyboardButton("🚀 Open Giveaway App", web_app=WebAppInfo(url=f"{WEB_URL}?start=ref_{user_id}")),
+            InlineKeyboardButton("🎁 Open Reward App", web_app=WebAppInfo(url=f"{WEB_URL}?start=ref_{user_id}")),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -521,7 +525,6 @@ def build_invite_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def build_owner_panel_keyboard() -> InlineKeyboardMarkup:
     """
     Interactive control panel keyboard for authorized owners.
-    Removed 'Open Admin Web App' as requested.
     """
     keyboard = [
         [
@@ -552,18 +555,15 @@ async def check_user_channels_membership(bot, user_id: int) -> tuple[bool, list[
         if not ch_id:
             continue
         try:
-            # Handle numeric IDs (e.g. -100xxxxxxxxxx for private channels)
             target_chat = int(ch_id) if str(ch_id).lstrip("-").isdigit() else str(ch_id)
             member = await bot.get_chat_member(chat_id=target_chat, user_id=user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 missing.append(ch)
         except BadRequest as e:
-            # User not found in chat means user hasn't joined!
             logger.info(f"User {user_id} not joined in {ch_id}: {e}")
             missing.append(ch)
         except Exception as e:
             logger.warning(f"Error checking membership for {ch_id} (user {user_id}): {e}")
-            # If bot cannot check (e.g., bot not added to private channel), don't block user
             pass
 
     return len(missing) == 0, missing
@@ -572,15 +572,17 @@ async def check_user_channels_membership(bot, user_id: int) -> tuple[bool, list[
 # ----------------- Command Handlers -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle /start command.
-    STRICT RULE: If user has not joined all channels, NO GIVEAWAY APP LINK IS GIVEN!
+    Handle /start command matching Screenshot 1:
+    👋 Hey There User Welcome To Bot !
+    🛑 Must Join Total Channel To Use Our Bot
+    💣 After Joining Click Claim
     """
     if not update.effective_user or not update.message:
         return
 
     user = update.effective_user
     user_id = user.id
-    first_name = user.first_name or "Friend"
+    first_name = user.first_name or "User"
     username = user.username or ""
 
     referrer_id = None
@@ -588,10 +590,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_arg = context.args[0]
         referrer_id = raw_arg.replace("ref_", "").strip()
 
+    channels = load_channels_from_db()
     all_joined, missing_channels = await check_user_channels_membership(context.bot, user_id)
 
-    if all_joined:
-        # User has joined ALL channels -> Safe to give Giveaway WebApp link!
+    if all_joined and len(channels) > 0:
+        # Already verified -> Show Congratulations message directly (Matching Screenshot 4)
         if referrer_id:
             await process_and_notify_referral(
                 context.bot,
@@ -601,35 +604,130 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username,
             )
 
-        ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-        welcome_text = (
-            f"🎉 <b>Welcome to Rohit Giveaway, {first_name}!</b>\n\n"
-            "🎁 <b>Sign Up Bonus: 1 Free Lucky Spin ready!</b>\n"
-            "🤝 <b>Referral Bonus: 1 Spin per friend invite!</b>\n\n"
-            f"🔗 <b>Your Personal Invite Link:</b>\n"
-            f"<code>{ref_link}</code>\n\n"
-            "Share this link with your friends to earn unlimited free spins!\n"
-            "Click below to open the app and start spinning to win instant cash!"
+        success_text = (
+            f"🎉 <b>Congratulations {first_name}</b>\n\n"
+            "Aap successfully verify ho gaye ho ✅\n\n"
+            "Neeche button dabao aur apna Free Spin khelo 🎡"
         )
         await update.message.reply_html(
-            welcome_text,
+            success_text,
             reply_markup=build_success_keyboard(referrer_id),
         )
-    else:
-        # User has NOT joined all channels -> NEVER GIVE GIVEAWAY APP LINK!
-        channel_names = "\n• ".join([c.get("name") or str(c.get("id")) for c in missing_channels])
-        must_join_text = (
-            f"👋 Hello <b>{first_name}</b>!\n\n"
-            "⚠️ <b>Access Locked!</b>\n"
-            "Giveaway App open karne aur <b>Free Lucky Spin</b> paane ke liye, "
-            "aapko hamare sabhi official channels join karna zaroori hai:\n\n"
-            f"• <b>{channel_names}</b>\n\n"
-            "Neeche diye gaye buttons se sabhi channels join karein aur <b>Verify</b> par tap karein!"
+        return
+
+    # Not all joined -> Show mandatory channels in 2 columns + Claim button (Matching Screenshot 1)
+    welcome_text = (
+        f"👋 <b>Hey There {first_name} Welcome To Bot !</b>\n\n"
+        "🛑 <b>Must Join Total Channel To Use Our Bot</b>\n\n"
+        "💣 <b>After Joining Click Claim</b>"
+    )
+    await update.message.reply_html(
+        welcome_text,
+        reply_markup=build_channel_join_keyboard(channels, referrer_id),
+    )
+
+
+async def claim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles click on '🟢 Claim' button (Matching Screenshot 1 -> Screenshot 2 or 4).
+    """
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    user_id = query.from_user.id
+    first_name = query.from_user.first_name or "User"
+    username = query.from_user.username or ""
+
+    referrer_id = None
+    if query.data and query.data.startswith("claim_"):
+        ref_val = query.data.replace("claim_", "").strip()
+        if ref_val and ref_val != "none":
+            referrer_id = ref_val
+
+    all_joined, missing = await check_user_channels_membership(context.bot, user_id)
+
+    if not all_joined:
+        await query.answer("⚠️ Pehle sabhi channels join karein!", show_alert=True)
+        ch_list = "\n• ".join([c.get("name") or str(c.get("id")) for c in missing])
+        await query.message.reply_html(
+            f"⚠️ <b>Pehle ye channel(s) join karein:</b>\n• {ch_list}\n\nUske baad neeche Verify button dabayein:"
         )
-        await update.message.reply_html(
-            must_join_text,
-            reply_markup=build_join_keyboard(missing_channels, referrer_id),
+
+    # Prompt Screenshot 2: [🛡️ Verify Yourself To Start Bot] with WebApp button
+    verify_url = f"{WEB_URL}?verify=true&ref={referrer_id}" if referrer_id else f"{WEB_URL}?verify=true"
+    verify_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛡️ Verify", web_app=WebAppInfo(url=verify_url))]
+    ])
+    await query.message.reply_html(
+        "🛡️ <b>Verify Yourself To Start Bot</b>",
+        reply_markup=verify_kb,
+    )
+
+
+async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles click on '🛡️ Verify' button (Matching Screenshot 2 -> Screenshot 4).
+    """
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    user_id = query.from_user.id
+    first_name = query.from_user.first_name or "User"
+    username = query.from_user.username or ""
+
+    referrer_id = None
+    if query.data and (query.data.startswith("verify_") or query.data.startswith("check_")):
+        ref_val = query.data.replace("verify_", "").replace("check_", "").strip()
+        if ref_val and ref_val != "none":
+            referrer_id = ref_val
+
+    all_joined, missing = await check_user_channels_membership(context.bot, user_id)
+
+    if not all_joined:
+        ch_list = "\n• ".join([c.get("name") or str(c.get("id")) for c in missing])
+        await query.answer(
+            f"❌ Aapne sabhi channels join nahi kiye!\n\nPlease join:\n• {ch_list}",
+            show_alert=True,
         )
+        return
+
+    await complete_verification(query, context, user_id, first_name, username, referrer_id)
+
+
+async def complete_verification(query, context, user_id, first_name, username, referrer_id):
+    """
+    Sends Screenshot 4 Congratulations & Open Reward App button,
+    and awards referrer instant spin & notification.
+    """
+    await query.answer("✅ Verification Successful!", show_alert=False)
+
+    if referrer_id:
+        await process_and_notify_referral(
+            context.bot,
+            referrer_id,
+            user_id,
+            first_name,
+            username,
+        )
+
+    success_text = (
+        f"🎉 <b>Congratulations {first_name}</b>\n\n"
+        "Aap successfully verify ho gaye ho ✅\n\n"
+        "Neeche button dabao aur apna Free Spin khelo 🎡"
+    )
+
+    try:
+        await query.message.reply_html(
+            success_text,
+            reply_markup=build_success_keyboard(referrer_id),
+        )
+    except Exception as e:
+        logger.warning(f"Notice sending verified message: {e}")
+
+
+check_membership = verify_callback
 
 
 async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1250,6 +1348,8 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast_command))
 
     # Callback Query Handlers
+    app.add_handler(CallbackQueryHandler(claim_callback, pattern=r"^claim_"))
+    app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
     app.add_handler(CallbackQueryHandler(check_membership, pattern=r"^check_"))
     app.add_handler(CallbackQueryHandler(owner_callback_router, pattern=r"^owner_"))
 

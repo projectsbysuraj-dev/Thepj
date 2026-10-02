@@ -863,6 +863,18 @@ export function processReferralJoin(referrerId: string, visitorId?: string): { s
 
   const currentUserId = String(visitorId || getCurrentUser().id).trim();
 
+  // ANTI-FRAUD / ANTI-ACCOUNT SWITCH CHECK:
+  // Ensure this phone is not already bound to a different Telegram ID
+  if (typeof window !== 'undefined') {
+    const boundLocalId = localStorage.getItem('rg_bound_telegram_id_v1');
+    if (boundLocalId && boundLocalId !== currentUserId) {
+      console.warn(`Referral blocked: Phone already bound to ID ${boundLocalId}, current is ${currentUserId}`);
+      return { success: false, message: 'Multi-account fraud blocked on this device' };
+    }
+    // Bind this phone to the verified account
+    localStorage.setItem('rg_bound_telegram_id_v1', currentUserId);
+  }
+
   if (cleanReferrerId === currentUserId) {
     return { success: false, message: 'Self referral is not allowed' };
   }
