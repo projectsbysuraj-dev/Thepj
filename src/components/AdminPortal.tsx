@@ -29,6 +29,8 @@ import {
 } from '../types';
 import {
   getAllWithdrawals,
+  refreshWithdrawalsFromRemote,
+  refreshUsersFromRemote,
   approveWithdrawal,
   rejectWithdrawal,
   saveSettings,
@@ -75,6 +77,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [withdrawals, setWithdrawals] = useState(getAllWithdrawals());
   const [users, setUsers] = useState(getAllUsers());
   const [adminCreds, setAdminCreds] = useState(getAdminCredentials());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
 
   // Settings form state
   const [botUsername, setBotUsername] = useState(settings.botUsername);
@@ -102,12 +106,26 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [copiedCode, setCopiedCode] = useState(false);
 
   useEffect(() => {
+    // 1. Initial live fetch directly from Firebase Realtime Database
+    refreshWithdrawalsFromRemote().then((res) => setWithdrawals(res));
+    refreshUsersFromRemote().then((res) => setUsers(res));
+
+    // 2. Realtime state subscription
     const unsub = subscribeRealtime(() => {
       setWithdrawals(getAllWithdrawals());
       setUsers(getAllUsers());
       setAdminCreds(getAdminCredentials());
     });
-    return unsub;
+
+    // 3. Periodic background sync every 5 seconds to ensure live cross-device queue updates
+    const syncInterval = setInterval(() => {
+      refreshWithdrawalsFromRemote().then((res) => setWithdrawals(res));
+    }, 5000);
+
+    return () => {
+      unsub();
+      clearInterval(syncInterval);
+    };
   }, []);
 
   useEffect(() => {
@@ -126,6 +144,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     if (result.success) {
       triggerHaptic('success');
       setIsAuthenticated(true);
+      // Fetch live data on successful login
+      refreshWithdrawalsFromRemote().then((res) => setWithdrawals(res));
+      refreshUsersFromRemote().then((res) => setUsers(res));
     } else {
       triggerHaptic('error');
       setLoginError(result.error || 'Invalid credentials');
@@ -138,24 +159,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setIsAuthenticated(false);
   };
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     triggerHaptic('light');
-    setWithdrawals(getAllWithdrawals());
-    setUsers(getAllUsers());
+    setIsRefreshing(true);
+    try {
+      const [w, u] = await Promise.all([
+        refreshWithdrawalsFromRemote(),
+        refreshUsersFromRemote(),
+      ]);
+      setWithdrawals(w);
+      setUsers(u);
+      triggerHaptic('success');
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
-  const handleApproveWithdrawal = (id: string) => {
+  const handleApproveWithdrawal = async (id: string) => {
     triggerHaptic('success');
     approveWithdrawal(id);
-    setWithdrawals(getAllWithdrawals());
+    const updated = await refreshWithdrawalsFromRemote();
+    setWithdrawals(updated);
   };
 
-  const handleRejectWithdrawal = (id: string) => {
+  const handleRejectWithdrawal = async (id: string) => {
     triggerHaptic('error');
     const reason = prompt('Reason for rejection (e.g. Invalid UPI ID / Incorrect Bank Details):', 'Invalid UPI ID / Details');
     if (reason !== null) {
       rejectWithdrawal(id, reason || 'Verification failed');
-      setWithdrawals(getAllWithdrawals());
+      const updated = await refreshWithdrawalsFromRemote();
+      setWithdrawals(updated);
     }
   };
 
@@ -356,6 +389,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // AUTHENTICATED ADMIN DASHBOARD
   // -------------------------------------------------------------
   const pendingCount = withdrawals.filter((w) => w.status === 'pending').length;
+  const approvedCount = withdrawals.filter((w) => w.status === 'approved').length;
+  const rejectedCount = withdrawals.filter((w) => w.status === 'rejected').length;
+
+  const displayedWithdrawals = withdrawals.filter((w) => {
+    if (withdrawalFilter === 'all') return true;
+    return w.status === withdrawalFilter;
+  });
+
   const filteredUsers = users.filter(
     (u) =>
       u.name.toLowerCase().includes(searchUserQuery.toLowerCase()) ||
@@ -503,31 +544,92 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         {/* ----------------- TAB 1: WITHDRAWALS ----------------- */}
         {activeTab === 'withdrawals' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/80 p-4 rounded-2xl border border-slate-800">
               <div>
-                <h2 className="font-['Outfit'] font-black text-xl text-white">
-                  Withdrawal Requests Queue
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-['Outfit'] font-black text-xl text-white">
+                    Withdrawal Requests Queue
+                  </h2>
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" title="Live Realtime Sync" />
+                </div>
                 <p className="text-xs text-slate-400">
                   Realtime pending UPI and Bank withdrawal requests from users
                 </p>
               </div>
-              <span className="text-xs font-bold text-slate-400 bg-slate-900 px-3 py-1 rounded-full border border-slate-800">
-                Total: {withdrawals.length}
-              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  className="bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/40 text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <RotateCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                  <span>{isRefreshing ? 'Syncing...' : 'Sync Live'}</span>
+                </button>
+                <span className="text-xs font-bold text-slate-400 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
+                  Total: {withdrawals.length}
+                </span>
+              </div>
             </div>
 
-            {withdrawals.length === 0 ? (
+            {/* Filter Tabs */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+              <button
+                onClick={() => setWithdrawalFilter('all')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                  withdrawalFilter === 'all'
+                    ? 'bg-slate-700 text-white shadow'
+                    : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                All ({withdrawals.length})
+              </button>
+              <button
+                onClick={() => setWithdrawalFilter('pending')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
+                  withdrawalFilter === 'pending'
+                    ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
+                    : 'bg-slate-900 text-amber-400 hover:bg-slate-800 border border-amber-500/30'
+                }`}
+              >
+                <span>Pending</span>
+                <span className="bg-amber-400/30 text-current px-1.5 py-0.2 rounded-full text-[10px]">
+                  {pendingCount}
+                </span>
+              </button>
+              <button
+                onClick={() => setWithdrawalFilter('approved')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                  withdrawalFilter === 'approved'
+                    ? 'bg-emerald-600 text-white shadow'
+                    : 'bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-emerald-500/30'
+                }`}
+              >
+                Approved ({approvedCount})
+              </button>
+              <button
+                onClick={() => setWithdrawalFilter('rejected')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                  withdrawalFilter === 'rejected'
+                    ? 'bg-rose-600 text-white shadow'
+                    : 'bg-slate-900 text-rose-400 hover:bg-slate-800 border border-rose-500/30'
+                }`}
+              >
+                Rejected ({rejectedCount})
+              </button>
+            </div>
+
+            {displayedWithdrawals.length === 0 ? (
               <div className="p-12 text-center bg-slate-900/60 rounded-2xl border border-slate-800 text-slate-500">
                 <CreditCard className="w-12 h-12 mx-auto mb-2 opacity-50 text-slate-400" />
-                <p className="font-bold text-sm">No withdrawal requests found</p>
+                <p className="font-bold text-sm">No {withdrawalFilter !== 'all' ? withdrawalFilter : ''} withdrawal requests found</p>
                 <p className="text-xs mt-1">
                   Requests created by users will automatically show up here in real-time.
                 </p>
               </div>
             ) : (
               <div className="space-y-3">
-                {withdrawals.map((item) => (
+                {displayedWithdrawals.map((item) => (
                   <div
                     key={item.id}
                     className="p-4 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4"

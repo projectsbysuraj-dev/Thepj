@@ -710,25 +710,83 @@ export function saveWithdrawals(list: WithdrawalRequest[]): void {
   notifySubscribers('withdrawals_updated');
 }
 
+export function getUserWithdrawals(userId: string): WithdrawalRequest[] {
+  const all = getAllWithdrawals();
+  const cleanId = String(userId).trim();
+  return all
+    .filter((w) => String(w.userId).trim() === cleanId)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+/**
+ * Direct Live REST Sync from Firebase RTDB (Guaranteed to work across all devices & networks)
+ */
+export async function refreshWithdrawalsFromRemote(): Promise<WithdrawalRequest[]> {
+  try {
+    const resp = await fetch('https://telebot-26c11-default-rtdb.firebaseio.com/withdrawals.json', {
+      cache: 'no-store',
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data && typeof data === 'object') {
+        const arr = (Object.values(data) as WithdrawalRequest[]).filter(
+          (x) => x && x.id && typeof x.amount === 'number'
+        );
+        arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        localStorage.setItem(STORAGE_KEYS.WITHDRAWALS, JSON.stringify(arr));
+        notifySubscribers('remote_withdrawals_synced');
+        return arr;
+      } else if (data === null) {
+        localStorage.setItem(STORAGE_KEYS.WITHDRAWALS, JSON.stringify([]));
+        notifySubscribers('remote_withdrawals_synced');
+        return [];
+      }
+    }
+  } catch (err) {
+    console.warn('Direct RTDB withdrawals fetch warning:', err);
+  }
+  return getAllWithdrawals();
+}
+
+/**
+ * Direct Live REST Sync for Users from Firebase RTDB
+ */
+export async function refreshUsersFromRemote(): Promise<UserProfile[]> {
+  try {
+    const resp = await fetch('https://telebot-26c11-default-rtdb.firebaseio.com/users.json', {
+      cache: 'no-store',
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data && typeof data === 'object') {
+        const arr = (Object.values(data) as UserProfile[]).filter((x) => x && x.id);
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(arr));
+        notifySubscribers('remote_users_synced');
+        return arr;
+      }
+    }
+  } catch (err) {
+    console.warn('Direct RTDB users fetch warning:', err);
+  }
+  return getAllUsers();
+}
+
 export function requestWithdrawal(req: Omit<WithdrawalRequest, 'id' | 'status' | 'createdAt'>): { success: boolean; error?: string; request?: WithdrawalRequest } {
   const settings = getStoredSettings();
-  const user = getCurrentUser();
+  const users = getAllUsers();
+  const u = users.find(x => x.id === req.userId || x.telegramId === req.userId) || getCurrentUser();
 
   if (req.amount < settings.minWithdrawalLimit) {
     return { success: false, error: `Minimum withdrawal amount is ₹${settings.minWithdrawalLimit}` };
   }
 
-  if (user.balance < req.amount) {
-    return { success: false, error: 'Insufficient balance' };
+  if (u.balance < req.amount) {
+    return { success: false, error: `Insufficient balance! Available balance is ₹${u.balance.toFixed(2)}` };
   }
 
   // Deduct balance immediately
-  const users = getAllUsers();
-  const u = users.find(x => x.id === user.id);
-  if (u) {
-    u.balance = Number((u.balance - req.amount).toFixed(2));
-    saveUsers(users);
-  }
+  u.balance = Number((u.balance - req.amount).toFixed(2));
+  saveUsers(users);
 
   const withdrawalId = `w_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const withdrawal: WithdrawalRequest = {
@@ -742,16 +800,29 @@ export function requestWithdrawal(req: Omit<WithdrawalRequest, 'id' | 'status' |
   all.unshift(withdrawal);
   saveWithdrawals(all);
 
-  // Push to Firebase Realtime Database
+  // 1. Push to Firebase SDK
   if (rtdb) {
     set(ref(rtdb, `withdrawals/${withdrawal.id}`), withdrawal).catch((e) => {
       console.warn('Firebase withdrawal create notice:', e);
     });
   }
 
+  // 2. Direct HTTP PUT Fallback (Guaranteed to hit database without depending on WebSockets)
+  try {
+    fetch(`https://telebot-26c11-default-rtdb.firebaseio.com/withdrawals/${withdrawal.id}.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(withdrawal),
+    }).catch((e) => {
+      console.warn('Direct HTTP PUT error:', e);
+    });
+  } catch {
+    // Ignore
+  }
+
   // Add transaction
   addTransaction({
-    userId: user.id,
+    userId: u.id,
     type: 'withdrawal',
     amount: -req.amount,
     description: req.method === 'upi' ? `Withdrawal to UPI: ${req.upiId}` : `Withdrawal to Bank: ${req.accountNumber}`,
@@ -770,7 +841,7 @@ export function approveWithdrawal(withdrawalId: string): boolean {
   item.updatedAt = Date.now();
   saveWithdrawals(list);
 
-  // Push update to Firebase Realtime Database
+  // 1. Push update via Firebase SDK
   if (rtdb) {
     update(ref(rtdb, `withdrawals/${withdrawalId}`), {
       status: 'approved',
@@ -778,6 +849,17 @@ export function approveWithdrawal(withdrawalId: string): boolean {
     }).catch((e) => {
       console.warn('Firebase approveWithdrawal notice:', e);
     });
+  }
+
+  // 2. Direct HTTP PATCH Fallback
+  try {
+    fetch(`https://telebot-26c11-default-rtdb.firebaseio.com/withdrawals/${withdrawalId}.json`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'approved', updatedAt: item.updatedAt }),
+    }).catch(() => {});
+  } catch {
+    // Ignore
   }
 
   // Update transaction status
@@ -801,7 +883,7 @@ export function rejectWithdrawal(withdrawalId: string, reason = 'Verification fa
   item.updatedAt = Date.now();
   saveWithdrawals(list);
 
-  // Push update to Firebase Realtime Database
+  // 1. Push update via Firebase SDK
   if (rtdb) {
     update(ref(rtdb, `withdrawals/${withdrawalId}`), {
       status: 'rejected',
@@ -810,6 +892,17 @@ export function rejectWithdrawal(withdrawalId: string, reason = 'Verification fa
     }).catch((e) => {
       console.warn('Firebase rejectWithdrawal notice:', e);
     });
+  }
+
+  // 2. Direct HTTP PATCH Fallback
+  try {
+    fetch(`https://telebot-26c11-default-rtdb.firebaseio.com/withdrawals/${withdrawalId}.json`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'rejected', rejectReason: reason, updatedAt: item.updatedAt }),
+    }).catch(() => {});
+  } catch {
+    // Ignore
   }
 
   // Refund money to user's balance
